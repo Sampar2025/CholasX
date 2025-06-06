@@ -13,89 +13,27 @@ CORS(app)
 PERPLEXITY_API_KEY = os.environ.get('PERPLEXITY_API_KEY')
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 
-def create_enhanced_query(query, location="UK"):
-    """Create enhanced query that matches direct Perplexity quality"""
-    # Clean and enhance the query
-    query_lower = query.lower()
-    
-    # Detect product type and enhance accordingly
-    if 'plasterboard' in query_lower or 'drywall' in query_lower:
-        product_type = "plasterboard"
-        enhanced = f"""Find the top 5 cheapest suppliers for {query} in {location}.
-
-Create a detailed comparison table showing:
-- Supplier names (Trade Insulations, Insulation4Less, Wickes, Screwfix, Buildbase, etc.)
-- Exact product names and specifications
-- Prices per board INCLUDING VAT
-- Board dimensions and coverage
-- Availability and delivery options
-
-Focus on UK building merchants and drywall/plasterboard specialists."""
-
-    elif 'pir' in query_lower or 'insulation' in query_lower:
-        product_type = "insulation"
-        enhanced = f"""Find the top 5 cheapest suppliers for {query} in {location}.
-
-Create a detailed comparison table showing:
-- Supplier names (Trade Insulations, Insulation4Less, Insulation Shop, Insulation Wholesale, etc.)
-- Exact product names (Celotex, Kingspan, Recticel, Unilin, Ecotherm)
-- Prices per board INCLUDING VAT
-- Board dimensions (2400mm x 1200mm) and m² coverage
-- Availability and delivery options
-
-Focus on UK insulation specialists and building merchants."""
-
-    else:
-        # Generic building materials search
-        enhanced = f"""Find the top 5 cheapest suppliers for {query} in {location}.
-
-Create a detailed comparison table showing:
-- Supplier names and contact details
-- Exact product names and specifications  
-- Prices INCLUDING VAT
-- Product dimensions and coverage
-- Availability and delivery options
-
-Focus on UK building merchants and trade suppliers."""
-
-    enhanced += f"""
-
-IMPORTANT: Provide a comprehensive ranking table like this format:
-Rank | Supplier & Product | Price (inc VAT) | Notes
-1 | [Supplier] - [Product] | £XX.XX | Details
-2 | [Supplier] - [Product] | £XX.XX | Details
-etc.
-
-Include detailed product specifications, supplier contact information, and current pricing."""
-    
-    return enhanced
-
-def call_perplexity_api(query):
-    """Call Perplexity API to get full detailed results"""
+def call_perplexity_api(user_query):
+    """Call Perplexity API with user's exact query - no modifications"""
     if not PERPLEXITY_API_KEY:
         raise Exception("Perplexity API key not configured")
-    
-    enhanced_query = create_enhanced_query(query)
     
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
         "Content-Type": "application/json"
     }
     
+    # Use the user's exact query, just like they would type on Perplexity website
     payload = {
         "model": "llama-3.1-sonar-large-128k-online",
         "messages": [
             {
-                "role": "system",
-                "content": "You are a UK building materials price comparison expert. Always search for current prices from real UK suppliers. Provide comprehensive comparison tables with exact pricing, supplier details, and product specifications. Focus on trade suppliers and building merchants. Always include VAT in pricing."
-            },
-            {
                 "role": "user", 
-                "content": enhanced_query
+                "content": user_query  # Exact user query, no modifications
             }
         ],
         "temperature": 0.1,
-        "max_tokens": 3000,  # Increased for full results
+        "max_tokens": 4000,
         "return_citations": True,
         "search_recency_filter": "month"
     }
@@ -107,44 +45,9 @@ def call_perplexity_api(query):
     except Exception as e:
         raise Exception(f"API request failed: {str(e)}")
 
-def clean_supplier_name(name):
-    """Clean and standardize supplier names"""
-    if not name:
-        return "UK Supplier"
-    
-    # Remove common prefixes/suffixes
-    name = re.sub(r'^\d+\.\s*', '', name)
-    name = name.replace('*', '').replace('|', '').strip()
-    
-    # Standardize known suppliers
-    name_lower = name.lower()
-    supplier_map = {
-        'trade insulation': 'Trade Insulations',
-        'insulation4less': 'Insulation4Less',
-        'insulation shop': 'Insulation Shop',
-        'insulation wholesale': 'Insulation Wholesale',
-        'insulation uk': 'Insulation UK',
-        'building materials': 'Building Materials Online',
-        'wickes': 'Wickes',
-        'screwfix': 'Screwfix',
-        'buildbase': 'Buildbase',
-        'selco': 'Selco',
-        'jewson': 'Jewson',
-        'travis perkins': 'Travis Perkins',
-        'homebase': 'Homebase',
-        'b&q': 'B&Q'
-    }
-    
-    for key, value in supplier_map.items():
-        if key in name_lower:
-            return value
-    
-    # Capitalize properly
-    return ' '.join(word.capitalize() for word in name.split())
-
 def extract_price_value(price_str):
     """Extract numeric value from price string for sorting"""
-    if not price_str or 'contact' in price_str.lower():
+    if not price_str:
         return float('inf')
     
     match = re.search(r'£?([\d,]+\.?\d*)', price_str)
@@ -152,163 +55,152 @@ def extract_price_value(price_str):
         return float(match.group(1).replace(',', ''))
     return float('inf')
 
-def parse_enhanced_response(ai_response):
-    """Parse full Perplexity response to extract all details"""
+def parse_perplexity_response(ai_response):
+    """Parse Perplexity response and extract structured data"""
     try:
         content = ai_response['choices'][0]['message']['content']
         citations = ai_response.get('citations', [])
         
         products = []
         
-        # Look for table format first
-        table_pattern = r'(\d+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|\n]+)'
-        table_matches = re.findall(table_pattern, content)
+        # Look for table format (like your example)
+        # Rank | Supplier & Product | Price | Notes
+        table_lines = []
+        lines = content.split('\n')
         
-        if table_matches:
-            # Parse table format
-            for rank, supplier_product, price, notes in table_matches:
-                product = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
                 
-                # Extract supplier and product from combined field
-                supplier_product = supplier_product.strip()
+            # Look for table rows with | separators
+            if '|' in line and any(char.isdigit() for char in line) and '£' in line:
+                parts = [part.strip() for part in line.split('|')]
+                if len(parts) >= 3:
+                    table_lines.append(parts)
+        
+        # Parse table format
+        for parts in table_lines:
+            if len(parts) >= 3:
+                rank_part = parts[0] if parts[0] else ""
+                supplier_part = parts[1] if len(parts) > 1 else ""
+                price_part = parts[2] if len(parts) > 2 else ""
+                notes_part = parts[3] if len(parts) > 3 else ""
+                
+                # Extract supplier and product
+                supplier_product = supplier_part.strip()
+                supplier = ""
+                product_name = ""
+                
                 if '–' in supplier_product or '-' in supplier_product:
-                    parts = re.split(r'[–-]', supplier_product, 1)
-                    if len(parts) == 2:
-                        product['supplier'] = clean_supplier_name(parts[0].strip())
-                        product['product_name'] = parts[1].strip()
-                    else:
-                        product['supplier'] = clean_supplier_name(supplier_product)
-                        product['product_name'] = 'Building Material'
+                    split_parts = re.split(r'[–-]', supplier_product, 1)
+                    if len(split_parts) == 2:
+                        supplier = split_parts[0].strip()
+                        product_name = split_parts[1].strip()
                 else:
-                    product['supplier'] = clean_supplier_name(supplier_product)
-                    product['product_name'] = 'Building Material'
+                    supplier = supplier_product
+                    product_name = "Building Material"
                 
                 # Extract price
-                price_match = re.search(r'£([\d,]+\.?\d*)', price)
-                if price_match:
-                    product['price'] = f"£{price_match.group(1)}"
+                price_match = re.search(r'£([\d,]+\.?\d*)', price_part)
+                price = f"£{price_match.group(1)}" if price_match else ""
                 
-                # Extract additional details from notes
-                if notes:
-                    product['notes'] = notes.strip()
-                
-                if product.get('supplier') and product.get('price'):
-                    products.append(product)
+                if supplier and price:
+                    products.append({
+                        'supplier': supplier,
+                        'product_name': product_name,
+                        'price': price,
+                        'notes': notes_part.strip() if notes_part else ""
+                    })
         
-        # If no table found, try other parsing methods
+        # If no table found, look for numbered list format
         if not products:
-            # Look for numbered list format
-            sections = re.split(r'\n(?=\d+\.|\*\*\d+\.)', content)
+            current_product = {}
             
-            for section in sections:
-                if not section.strip():
+            for line in lines:
+                line = line.strip()
+                if not line:
                     continue
+                
+                # Look for numbered items (1., 2., etc.)
+                if re.match(r'^\d+\.?\s', line):
+                    # Save previous product
+                    if current_product.get('supplier') and current_product.get('price'):
+                        products.append(current_product)
                     
-                product = {}
+                    # Start new product
+                    current_product = {}
+                    
+                    # Extract supplier from numbered line
+                    supplier_match = re.search(r'^\d+\.?\s*(.+?)(?:\s*[–-]|$)', line)
+                    if supplier_match:
+                        current_product['supplier'] = supplier_match.group(1).strip()
                 
-                # Extract supplier name
-                supplier_patterns = [
-                    r'\*\*([^*]+)\*\*',
-                    r'(\d+\.\s*)?\*\*([^*]+)\*\*',
-                    r'(\d+\.\s*)?([A-Z][a-zA-Z\s&0-9]+?)(?:\s*[–-]|\s*:|\n)',
-                    r'(Trade Insulations|Insulation4Less|Insulation Shop|Insulation UK|Insulation Wholesale|Building Materials Online|Wickes|Screwfix|Buildbase|Selco|Jewson|Travis Perkins|Homebase|B&Q)',
-                ]
+                # Look for product information
+                elif 'product:' in line.lower() or 'board' in line.lower() or 'plasterboard' in line.lower():
+                    product_match = re.search(r'(?:product:?\s*)?(.+)', line, re.IGNORECASE)
+                    if product_match:
+                        current_product['product_name'] = product_match.group(1).strip()
                 
-                for pattern in supplier_patterns:
-                    match = re.search(pattern, section, re.IGNORECASE)
-                    if match:
-                        if len(match.groups()) >= 2 and match.group(2):
-                            supplier_raw = match.group(2).strip()
-                        elif match.group(1):
-                            supplier_raw = match.group(1).strip()
-                        else:
-                            supplier_raw = match.group(0).strip()
-                        
-                        product['supplier'] = clean_supplier_name(supplier_raw)
-                        break
-                
-                # Extract product name
-                product_patterns = [
-                    r'Product:\s*([^\n]+)',
-                    r'-\s*\*\*Product:\*\*\s*([^\n]+)',
-                    r'((?:12\.5mm|9\.5mm|15mm|50mm|100mm)\s*[^£\n]*(?:plasterboard|PIR|insulation|board)[^£\n]*)',
-                    r'([A-Z][a-zA-Z0-9\s\-]+(?:plasterboard|PIR|insulation|board)[^£\n]*)',
-                ]
-                
-                for pattern in product_patterns:
-                    match = re.search(pattern, section, re.IGNORECASE)
-                    if match:
-                        product['product_name'] = match.group(1).strip()
-                        break
-                
-                # Extract price
-                price_patterns = [
-                    r'£([\d,]+\.?\d*)\s*(?:per\s*board|per\s*sheet)?(?:\s*(?:inc|including)\s*VAT)?',
-                    r'Price[^£]*£([\d,]+\.?\d*)',
-                    r'£([\d,]+\.?\d*)\s*(?:\([^)]*\))?',
-                ]
-                
-                for pattern in price_patterns:
-                    matches = re.findall(pattern, section, re.IGNORECASE)
-                    if matches:
-                        for price_str in matches:
-                            price_val = float(price_str.replace(',', ''))
-                            if 5 <= price_val <= 200:  # Reasonable range for building materials
-                                product['price'] = f"£{price_val:.2f}"
-                                break
-                        if product.get('price'):
-                            break
-                
-                # Extract dimensions
-                dimensions_match = re.search(r'(\d+mm\s*x\s*\d+mm)', section)
-                if dimensions_match:
-                    product['dimensions'] = dimensions_match.group(1)
-                
-                # Only add valid products
-                if product.get('supplier') and product.get('price'):
-                    product.setdefault('product_name', 'Building Material')
-                    products.append(product)
+                # Look for price information
+                elif '£' in line:
+                    price_match = re.search(r'£([\d,]+\.?\d*)', line)
+                    if price_match:
+                        current_product['price'] = f"£{price_match.group(1)}"
+            
+            # Add final product
+            if current_product.get('supplier') and current_product.get('price'):
+                products.append(current_product)
+        
+        # Clean up and set defaults
+        for product in products:
+            if not product.get('product_name'):
+                # Try to guess product type from query or content
+                if 'plasterboard' in content.lower():
+                    product['product_name'] = 'Plasterboard'
+                elif 'pir' in content.lower() or 'insulation' in content.lower():
+                    product['product_name'] = 'PIR Insulation Board'
+                else:
+                    product['product_name'] = 'Building Material'
         
         # Sort by price (cheapest first)
         products.sort(key=lambda x: extract_price_value(x.get('price', '')))
         
-        # Create comprehensive summary
+        # Create simple summary
         if products:
             summary_parts = []
-            for i, product in enumerate(products[:5], 1):
+            for i, product in enumerate(products[:3], 1):
                 supplier = product.get('supplier', 'Unknown')
                 price = product.get('price', 'N/A')
-                summary_parts.append(f"{i}. {supplier}: {price}")
-            
-            summary = f"Top 5 cheapest suppliers found:\n" + "\n".join(summary_parts)
+                summary_parts.append(f"{supplier}: {price}")
+            summary = f"Top suppliers: {', '.join(summary_parts)}"
         else:
-            summary = "Search completed. See full details below."
+            summary = "Search completed."
         
         return {
             'results': products[:5],
             'ai_summary': summary,
-            'full_content': content,  # Include full content for debugging
+            'full_response': content,  # Include full response for debugging
             'citations': citations,
             'search_metadata': {
                 'total_results': len(products),
-                'sources_checked': 'Multiple UK suppliers',
                 'search_time': 'Real-time'
             }
         }
         
     except Exception as e:
+        # Return full content if parsing fails
         return {
             'results': [{
-                'product_name': 'Search Results Available',
-                'price': 'See full content below',
-                'supplier': 'Multiple UK Suppliers'
+                'supplier': 'Multiple Suppliers',
+                'product_name': 'See full response below',
+                'price': 'Various prices'
             }],
-            'ai_summary': 'Search completed successfully.',
-            'full_content': content,  # Always include full content
+            'ai_summary': 'Search completed - see full response.',
+            'full_response': content,
             'citations': ai_response.get('citations', []),
             'search_metadata': {
                 'total_results': 1,
-                'sources_checked': 'Multiple sources',
                 'search_time': 'Real-time'
             }
         }
@@ -319,35 +211,34 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'AI Building Materials Search API',
-        'version': '1.5',
+        'version': '2.0',
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/api/search', methods=['POST'])
 def search_products():
-    """Main search endpoint with full Perplexity results"""
+    """Main search endpoint - uses exact user query"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
         
-        query = data.get('query', '').strip()
-        location = data.get('location', 'UK').strip()
-        max_results = min(int(data.get('max_results', 5)), 10)
+        # Get user's exact query
+        user_query = data.get('query', '').strip()
         
-        if not query:
+        if not user_query:
             return jsonify({'error': 'Query parameter is required'}), 400
         
-        if len(query) < 3:
+        if len(user_query) < 3:
             return jsonify({'error': 'Query must be at least 3 characters long'}), 400
         
         start_time = time.time()
         
-        # Call enhanced Perplexity API
-        ai_response = call_perplexity_api(query)
+        # Call Perplexity API with user's exact query
+        ai_response = call_perplexity_api(user_query)
         
-        # Parse full response
-        parsed_results = parse_enhanced_response(ai_response)
+        # Parse the response
+        parsed_results = parse_perplexity_response(ai_response)
         
         # Add timing information
         search_time = round(time.time() - start_time, 2)
@@ -363,32 +254,28 @@ def search_products():
 
 @app.route('/api/search/demo', methods=['GET'])
 def demo_search():
-    """Demo endpoint with sample data"""
+    """Demo endpoint"""
     return jsonify({
         'results': [
             {
-                'product_name': '12.5mm Standard Plasterboard',
-                'price': '£8.50',
-                'supplier': 'Wickes',
-                'dimensions': '2400mm x 1200mm'
+                'supplier': 'Trade Insulations',
+                'product_name': 'Celotex GA4050 / Recticel GP',
+                'price': '£17.50'
             },
             {
-                'product_name': '12.5mm Gyproc WallBoard',
-                'price': '£9.20',
-                'supplier': 'Screwfix',
-                'dimensions': '2400mm x 1200mm'
+                'supplier': 'Insulation4Less',
+                'product_name': 'Unilin Thin-R PIR',
+                'price': '£18.22'
             },
             {
-                'product_name': '12.5mm Standard Plasterboard',
-                'price': '£9.85',
-                'supplier': 'Buildbase',
-                'dimensions': '2400mm x 1200mm'
+                'supplier': 'Insulation Wholesale',
+                'product_name': 'Ecotherm Eco-Versal PIR',
+                'price': '£18.08'
             }
         ],
-        'ai_summary': 'Top 3 cheapest suppliers found:\n1. Wickes: £8.50\n2. Screwfix: £9.20\n3. Buildbase: £9.85',
+        'ai_summary': 'Top suppliers: Trade Insulations: £17.50, Insulation4Less: £18.22, Insulation Wholesale: £18.08',
         'search_metadata': {
             'total_results': 3,
-            'sources_checked': 'Multiple UK suppliers',
             'search_time': '2.1s'
         }
     })
