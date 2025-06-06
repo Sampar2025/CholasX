@@ -14,7 +14,7 @@ PERPLEXITY_API_KEY = os.environ.get('PERPLEXITY_API_KEY')
 PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
 
 def call_perplexity_api(user_query):
-    """Call Perplexity API with user's exact query - no modifications"""
+    """Call Perplexity API with user's exact query"""
     if not PERPLEXITY_API_KEY:
         raise Exception("Perplexity API key not configured")
     
@@ -23,13 +23,12 @@ def call_perplexity_api(user_query):
         "Content-Type": "application/json"
     }
     
-    # Use the user's exact query, just like they would type on Perplexity website
     payload = {
         "model": "llama-3.1-sonar-large-128k-online",
         "messages": [
             {
                 "role": "user", 
-                "content": user_query  # Exact user query, no modifications
+                "content": user_query
             }
         ],
         "temperature": 0.1,
@@ -55,51 +54,33 @@ def extract_price_value(price_str):
         return float(match.group(1).replace(',', ''))
     return float('inf')
 
-def parse_perplexity_response(ai_response):
-    """Parse Perplexity response and extract structured data"""
-    try:
-        content = ai_response['choices'][0]['message']['content']
-        citations = ai_response.get('citations', [])
-        
-        products = []
-        
-        # Look for table format (like your example)
-        # Rank | Supplier & Product | Price | Notes
-        table_lines = []
-        lines = content.split('\n')
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-                
-            # Look for table rows with | separators
-            if '|' in line and any(char.isdigit() for char in line) and '£' in line:
-                parts = [part.strip() for part in line.split('|')]
-                if len(parts) >= 3:
-                    table_lines.append(parts)
-        
-        # Parse table format
-        for parts in table_lines:
+def robust_parse_response(content):
+    """Robust parsing that handles multiple response formats"""
+    products = []
+    
+    # Method 1: Look for table format with | separators
+    lines = content.split('\n')
+    for line in lines:
+        line = line.strip()
+        if '|' in line and '£' in line and any(char.isdigit() for char in line):
+            parts = [part.strip() for part in line.split('|')]
             if len(parts) >= 3:
-                rank_part = parts[0] if parts[0] else ""
+                # Skip header rows
+                if 'rank' in parts[0].lower() or 'supplier' in parts[1].lower():
+                    continue
+                
+                rank_part = parts[0]
                 supplier_part = parts[1] if len(parts) > 1 else ""
                 price_part = parts[2] if len(parts) > 2 else ""
-                notes_part = parts[3] if len(parts) > 3 else ""
                 
                 # Extract supplier and product
-                supplier_product = supplier_part.strip()
-                supplier = ""
-                product_name = ""
-                
-                if '–' in supplier_product or '-' in supplier_product:
-                    split_parts = re.split(r'[–-]', supplier_product, 1)
-                    if len(split_parts) == 2:
-                        supplier = split_parts[0].strip()
-                        product_name = split_parts[1].strip()
+                if '–' in supplier_part or '-' in supplier_part:
+                    split_parts = re.split(r'[–-]', supplier_part, 1)
+                    supplier = split_parts[0].strip()
+                    product_name = split_parts[1].strip() if len(split_parts) > 1 else ""
                 else:
-                    supplier = supplier_product
-                    product_name = "Building Material"
+                    supplier = supplier_part.strip()
+                    product_name = ""
                 
                 # Extract price
                 price_match = re.search(r'£([\d,]+\.?\d*)', price_part)
@@ -108,79 +89,127 @@ def parse_perplexity_response(ai_response):
                 if supplier and price:
                     products.append({
                         'supplier': supplier,
-                        'product_name': product_name,
-                        'price': price,
-                        'notes': notes_part.strip() if notes_part else ""
+                        'product_name': product_name or "Building Material",
+                        'price': price
                     })
-        
-        # If no table found, look for numbered list format
-        if not products:
-            current_product = {}
+    
+    # Method 2: Look for numbered list format if no table found
+    if not products:
+        current_item = {}
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
             
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
+            # Look for numbered items
+            if re.match(r'^\d+\.?\s', line):
+                # Save previous item
+                if current_item.get('supplier') and current_item.get('price'):
+                    products.append(current_item)
                 
-                # Look for numbered items (1., 2., etc.)
-                if re.match(r'^\d+\.?\s', line):
-                    # Save previous product
-                    if current_product.get('supplier') and current_product.get('price'):
-                        products.append(current_product)
-                    
-                    # Start new product
-                    current_product = {}
-                    
-                    # Extract supplier from numbered line
-                    supplier_match = re.search(r'^\d+\.?\s*(.+?)(?:\s*[–-]|$)', line)
-                    if supplier_match:
-                        current_product['supplier'] = supplier_match.group(1).strip()
+                # Start new item
+                current_item = {}
                 
-                # Look for product information
-                elif 'product:' in line.lower() or 'board' in line.lower() or 'plasterboard' in line.lower():
-                    product_match = re.search(r'(?:product:?\s*)?(.+)', line, re.IGNORECASE)
-                    if product_match:
-                        current_product['product_name'] = product_match.group(1).strip()
+                # Extract supplier from numbered line
+                line_clean = re.sub(r'^\d+\.?\s*', '', line)
                 
-                # Look for price information
-                elif '£' in line:
-                    price_match = re.search(r'£([\d,]+\.?\d*)', line)
-                    if price_match:
-                        current_product['price'] = f"£{price_match.group(1)}"
+                # Look for supplier name patterns
+                supplier_patterns = [
+                    r'^([^–-]+)(?:[–-](.+))?',
+                    r'^(.+?)(?:\s*-\s*(.+))?$'
+                ]
+                
+                for pattern in supplier_patterns:
+                    match = re.search(pattern, line_clean)
+                    if match:
+                        current_item['supplier'] = match.group(1).strip()
+                        if match.group(2):
+                            current_item['product_name'] = match.group(2).strip()
+                        break
+                
+                if not current_item.get('supplier'):
+                    current_item['supplier'] = line_clean
             
-            # Add final product
-            if current_product.get('supplier') and current_product.get('price'):
-                products.append(current_product)
+            # Look for price in current or next lines
+            elif '£' in line and current_item.get('supplier'):
+                price_match = re.search(r'£([\d,]+\.?\d*)', line)
+                if price_match:
+                    current_item['price'] = f"£{price_match.group(1)}"
+            
+            # Look for product information
+            elif any(keyword in line.lower() for keyword in ['product', 'board', 'plasterboard', 'insulation', 'celotex', 'kingspan']):
+                if current_item.get('supplier') and not current_item.get('product_name'):
+                    current_item['product_name'] = line.strip()
         
-        # Clean up and set defaults
-        for product in products:
-            if not product.get('product_name'):
-                # Try to guess product type from query or content
-                if 'plasterboard' in content.lower():
-                    product['product_name'] = 'Plasterboard'
-                elif 'pir' in content.lower() or 'insulation' in content.lower():
-                    product['product_name'] = 'PIR Insulation Board'
-                else:
-                    product['product_name'] = 'Building Material'
+        # Add final item
+        if current_item.get('supplier') and current_item.get('price'):
+            products.append(current_item)
+    
+    # Method 3: Simple text extraction if other methods fail
+    if not products:
+        # Find all prices and suppliers mentioned
+        all_prices = re.findall(r'£([\d,]+\.?\d*)', content)
+        
+        # Common supplier names to look for
+        suppliers = [
+            'Trade Insulations', 'Insulation4Less', 'Insulation Shop', 'Insulation Wholesale',
+            'Insulation UK', 'Wickes', 'Screwfix', 'Buildbase', 'Selco', 'Jewson',
+            'Travis Perkins', 'Homebase', 'B&Q', 'Building Materials Online'
+        ]
+        
+        found_suppliers = []
+        for supplier in suppliers:
+            if supplier.lower() in content.lower():
+                found_suppliers.append(supplier)
+        
+        # Match suppliers with prices (simple approach)
+        for i, supplier in enumerate(found_suppliers[:len(all_prices)]):
+            if i < len(all_prices):
+                products.append({
+                    'supplier': supplier,
+                    'product_name': 'Building Material',
+                    'price': f"£{all_prices[i]}"
+                })
+    
+    # Clean up and set defaults
+    for product in products:
+        if not product.get('product_name'):
+            if 'plasterboard' in content.lower():
+                product['product_name'] = 'Plasterboard'
+            elif 'pir' in content.lower() or 'insulation' in content.lower():
+                product['product_name'] = 'PIR Insulation Board'
+            else:
+                product['product_name'] = 'Building Material'
+    
+    return products
+
+def parse_perplexity_response(ai_response):
+    """Parse Perplexity response with robust fallbacks"""
+    try:
+        content = ai_response['choices'][0]['message']['content']
+        citations = ai_response.get('citations', [])
+        
+        # Use robust parsing
+        products = robust_parse_response(content)
         
         # Sort by price (cheapest first)
         products.sort(key=lambda x: extract_price_value(x.get('price', '')))
         
-        # Create simple summary
+        # Create summary
         if products:
             summary_parts = []
-            for i, product in enumerate(products[:3], 1):
+            for product in products[:3]:
                 supplier = product.get('supplier', 'Unknown')
                 price = product.get('price', 'N/A')
                 summary_parts.append(f"{supplier}: {price}")
             summary = f"Top suppliers: {', '.join(summary_parts)}"
         else:
-            summary = "Search completed."
+            summary = "Search completed - see full response below."
         
         return {
             'results': products[:5],
             'ai_summary': summary,
-            'full_response': content,  # Include full response for debugging
+            'full_response': content,  # Always include for debugging
             'citations': citations,
             'search_metadata': {
                 'total_results': len(products),
@@ -189,19 +218,22 @@ def parse_perplexity_response(ai_response):
         }
         
     except Exception as e:
-        # Return full content if parsing fails
+        # Always return something, even if parsing fails
+        content = ai_response.get('choices', [{}])[0].get('message', {}).get('content', 'No content')
+        
         return {
             'results': [{
-                'supplier': 'Multiple Suppliers',
+                'supplier': 'Search Results Available',
                 'product_name': 'See full response below',
-                'price': 'Various prices'
+                'price': 'Various'
             }],
-            'ai_summary': 'Search completed - see full response.',
+            'ai_summary': 'Search completed - check full response.',
             'full_response': content,
             'citations': ai_response.get('citations', []),
             'search_metadata': {
                 'total_results': 1,
-                'search_time': 'Real-time'
+                'search_time': 'Real-time',
+                'parsing_error': str(e)
             }
         }
 
@@ -211,19 +243,18 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'AI Building Materials Search API',
-        'version': '2.0',
+        'version': '2.1',
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/api/search', methods=['POST'])
 def search_products():
-    """Main search endpoint - uses exact user query"""
+    """Main search endpoint with robust parsing"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
         
-        # Get user's exact query
         user_query = data.get('query', '').strip()
         
         if not user_query:
@@ -234,13 +265,13 @@ def search_products():
         
         start_time = time.time()
         
-        # Call Perplexity API with user's exact query
+        # Call Perplexity API
         ai_response = call_perplexity_api(user_query)
         
-        # Parse the response
+        # Parse with robust fallbacks
         parsed_results = parse_perplexity_response(ai_response)
         
-        # Add timing information
+        # Add timing
         search_time = round(time.time() - start_time, 2)
         parsed_results['search_metadata']['search_time'] = f"{search_time}s"
         
@@ -249,12 +280,13 @@ def search_products():
     except Exception as e:
         return jsonify({
             'error': str(e),
-            'message': 'Search failed. Please try again or contact support.'
+            'message': 'Search failed. Please try again or contact support.',
+            'query_received': data.get('query', '') if 'data' in locals() else 'Unknown'
         }), 500
 
 @app.route('/api/search/demo', methods=['GET'])
 def demo_search():
-    """Demo endpoint"""
+    """Demo endpoint with sample data"""
     return jsonify({
         'results': [
             {
