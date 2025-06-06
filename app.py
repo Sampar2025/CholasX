@@ -20,15 +20,14 @@ def create_enhanced_query(query, location="UK"):
 REQUIREMENTS:
 - Include exact prices per board INCLUDING VAT (£ per board inc VAT)
 - Only include suppliers with actual prices (no "contact for price")
-- Include supplier names and contact details
-- Include product specifications and availability
+- Include supplier names and product names only
 - Focus on UK building material suppliers and insulation specialists
-- Compare prices from multiple suppliers
 - Show results ranked from cheapest to most expensive
+- Keep response concise and focused on pricing only
 
-SEARCH FOCUS: UK insulation suppliers like Insulation4Less, Trade Insulations, Insulation Shop, Insulation Wholesale, etc.
+SEARCH FOCUS: UK insulation suppliers like Insulation4Less, Trade Insulations, Insulation Shop, Insulation UK, etc.
 
-Please provide detailed pricing comparison with VAT-inclusive prices and supplier contact information."""
+Please provide a simple price comparison list without detailed explanations."""
     
     return enhanced
 
@@ -49,7 +48,7 @@ def call_perplexity_api(query):
         "messages": [
             {
                 "role": "system",
-                "content": "You are a UK building materials price comparison expert. Always search for current prices INCLUDING VAT from real UK suppliers. Only include suppliers with actual prices, not 'contact for price'. Provide specific VAT-inclusive pricing, supplier names, contact details, and product specifications. Focus on insulation specialists and building merchants."
+                "content": "You are a UK building materials price comparison expert. Provide only essential information: supplier names, product names, and VAT-inclusive prices. Keep responses concise without detailed explanations or contact information."
             },
             {
                 "role": "user", 
@@ -57,7 +56,7 @@ def call_perplexity_api(query):
             }
         ],
         "temperature": 0.1,
-        "max_tokens": 2000,
+        "max_tokens": 1500,
         "return_citations": True,
         "search_recency_filter": "month"
     }
@@ -111,16 +110,28 @@ def clean_supplier_name(name):
 def extract_price_value(price_str):
     """Extract numeric value from price string for sorting"""
     if not price_str or 'contact' in price_str.lower():
-        return float('inf')  # Put "contact for price" at the end
+        return float('inf')
     
-    # Extract number from price string
     match = re.search(r'£?([\d,]+\.?\d*)', price_str)
     if match:
         return float(match.group(1).replace(',', ''))
     return float('inf')
 
+def create_simple_summary(products):
+    """Create a simple, clean summary"""
+    if not products:
+        return "No results found."
+    
+    summary_parts = []
+    for i, product in enumerate(products[:3], 1):
+        supplier = product.get('supplier', 'Unknown')
+        price = product.get('price', 'N/A')
+        summary_parts.append(f"{supplier}: {price}")
+    
+    return f"Top suppliers found: {', '.join(summary_parts)}"
+
 def parse_enhanced_response(ai_response):
-    """Parse AI response with optimized price extraction and sorting"""
+    """Parse AI response with simplified output"""
     try:
         content = ai_response['choices'][0]['message']['content']
         citations = ai_response.get('citations', [])
@@ -136,13 +147,12 @@ def parse_enhanced_response(ai_response):
                 
             product = {}
             
-            # Extract supplier name with improved patterns
+            # Extract supplier name
             supplier_patterns = [
-                r'\*\*([^*]+)\*\*',  # **Supplier Name**
-                r'(\d+\.\s*)?\*\*([^*]+)\*\*',  # 1. **Supplier Name**
-                r'(\d+\.\s*)?([A-Z][a-zA-Z\s&0-9]+?)(?:\s*-|\s*:|\n)',  # 1. Supplier Name -
+                r'\*\*([^*]+)\*\*',
+                r'(\d+\.\s*)?\*\*([^*]+)\*\*',
+                r'(\d+\.\s*)?([A-Z][a-zA-Z\s&0-9]+?)(?:\s*-|\s*:|\n)',
                 r'(Insulation4Less|Trade Insulations|Insulation Shop|Insulation UK|Insulation Wholesale|Building Materials Online|Selco|Buildbase|Wickes|Screwfix|Jewson|Travis Perkins)',
-                r'([A-Z][a-zA-Z\s&]+?)(?:\s*-\s*\*\*Product)',  # Supplier - **Product
             ]
             
             for pattern in supplier_patterns:
@@ -172,7 +182,7 @@ def parse_enhanced_response(ai_response):
                     product['product_name'] = match.group(1).strip()
                     break
             
-            # Extract prices with VAT handling
+            # Extract prices
             price_patterns = [
                 r'£([\d,]+\.?\d*)\s*(?:per\s*board)?(?:\s*(?:inc|including)\s*VAT)?',
                 r'Price:\s*£([\d,]+\.?\d*)',
@@ -183,93 +193,36 @@ def parse_enhanced_response(ai_response):
             for pattern in price_patterns:
                 matches = re.findall(pattern, section, re.IGNORECASE)
                 if matches:
-                    # Get the first reasonable price (between £10-£100 for PIR boards)
                     for price_str in matches:
                         price_val = float(price_str.replace(',', ''))
-                        if 10 <= price_val <= 100:  # Reasonable range for PIR boards
+                        if 10 <= price_val <= 100:  # Reasonable range
                             product['price'] = f"£{price_val:.2f}"
                             price_found = True
                             break
                     if price_found:
                         break
             
-            # Extract per m² price if available
-            per_m2_match = re.search(r'£([\d,]+\.?\d*)\s*per\s*m²', section, re.IGNORECASE)
-            if per_m2_match:
-                product['price_per_unit'] = f"£{per_m2_match.group(1)} per m²"
-            
-            # Extract contact information
-            phone_patterns = [
-                r'Phone:\s*([\d\s\-\(\)]+)',
-                r'Tel:\s*([\d\s\-\(\)]+)',
-                r'Contact:\s*([\d\s\-\(\)]+)',
-                r'(\d{4}\s*\d{3}\s*\d{4})',  # UK phone format
-                r'(\d{3}\s*\d{3}\s*\d{4})',  # Alternative format
-            ]
-            
-            for pattern in phone_patterns:
-                match = re.search(pattern, section)
-                if match:
-                    product['supplier_phone'] = match.group(1).strip()
-                    break
-            
-            # Extract availability
-            if 'in stock' in section.lower():
-                product['availability'] = 'In Stock'
-            elif 'available' in section.lower():
-                product['availability'] = 'Available'
-            
-            # Extract delivery info
-            if 'free delivery' in section.lower():
-                delivery_match = re.search(r'free delivery[^.]*', section, re.IGNORECASE)
-                if delivery_match:
-                    product['delivery_info'] = delivery_match.group(0).capitalize()
-            elif 'delivery' in section.lower():
-                product['delivery_info'] = 'Delivery available'
+            # Extract dimensions if available
+            dimensions_match = re.search(r'(\d+mm\s*x\s*\d+mm)', section)
+            if dimensions_match:
+                product['dimensions'] = dimensions_match.group(1)
             
             # Only add products with valid supplier and price
             if product.get('supplier') and product.get('price') and 'contact' not in product['price'].lower():
-                # Set defaults
+                # Set minimal defaults
                 product.setdefault('product_name', '50mm PIR Insulation Board')
-                product.setdefault('availability', 'Contact supplier')
-                product.setdefault('location', 'UK')
-                product.setdefault('delivery_info', 'Contact for delivery options')
-                
-                # Generate supplier URL
-                supplier_clean = product['supplier'].lower().replace(' ', '').replace('&', '').replace('materials', '').replace('online', '')
-                if 'insulation4less' in supplier_clean:
-                    product['supplier_url'] = 'https://insulation4less.co.uk'
-                elif 'tradeinsulations' in supplier_clean:
-                    product['supplier_url'] = 'https://tradeinsulations.co.uk'
-                elif 'insulationshop' in supplier_clean:
-                    product['supplier_url'] = 'https://insulationshop.co'
-                elif 'insulationuk' in supplier_clean:
-                    product['supplier_url'] = 'https://insulationuk.co.uk'
-                elif 'insulationwholesale' in supplier_clean:
-                    product['supplier_url'] = 'https://insulationwholesale.co.uk'
-                else:
-                    product['supplier_url'] = f"https://{supplier_clean}.co.uk"
                 
                 products.append(product)
         
         # Sort products by price (cheapest first)
         products.sort(key=lambda x: extract_price_value(x.get('price', '')))
         
-        # If no products extracted, create a fallback
-        if not products:
-            products = [{
-                'product_name': 'Search Results Available',
-                'price': 'See summary below',
-                'supplier': 'Multiple UK Suppliers',
-                'availability': 'Various',
-                'location': 'UK',
-                'delivery_info': 'Contact suppliers',
-                'supplier_url': '#'
-            }]
+        # Create simple summary
+        simple_summary = create_simple_summary(products)
         
         return {
             'results': products[:5],  # Top 5 cheapest
-            'ai_summary': content,
+            'ai_summary': simple_summary,  # Simple summary instead of full content
             'citations': citations,
             'search_metadata': {
                 'total_results': len(products),
@@ -279,18 +232,13 @@ def parse_enhanced_response(ai_response):
         }
         
     except Exception as e:
-        # Fallback response
         return {
             'results': [{
                 'product_name': 'Search Results Available',
-                'price': 'See summary below',
-                'supplier': 'Multiple UK Suppliers',
-                'availability': 'Various',
-                'location': 'UK',
-                'delivery_info': 'Contact suppliers',
-                'supplier_url': '#'
+                'price': 'See details below',
+                'supplier': 'Multiple UK Suppliers'
             }],
-            'ai_summary': content,
+            'ai_summary': 'Search completed successfully.',
             'citations': ai_response.get('citations', []),
             'search_metadata': {
                 'total_results': 1,
@@ -305,13 +253,13 @@ def health_check():
     return jsonify({
         'status': 'healthy',
         'service': 'AI Building Materials Search API',
-        'version': '1.3',
+        'version': '1.4',
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/api/search', methods=['POST'])
 def search_products():
-    """Main search endpoint with optimized results"""
+    """Main search endpoint with simplified results"""
     try:
         data = request.get_json()
         if not data:
@@ -329,10 +277,10 @@ def search_products():
         
         start_time = time.time()
         
-        # Call enhanced Perplexity API
+        # Call Perplexity API
         ai_response = call_perplexity_api(query)
         
-        # Parse enhanced response with optimized sorting
+        # Parse with simplified output
         parsed_results = parse_enhanced_response(ai_response)
         
         # Add timing information
@@ -349,43 +297,29 @@ def search_products():
 
 @app.route('/api/search/demo', methods=['GET'])
 def demo_search():
-    """Demo endpoint with sample data"""
+    """Demo endpoint with simplified sample data"""
     return jsonify({
         'results': [
             {
                 'product_name': '50mm Celotex GA4050 PIR Insulation Board',
                 'price': '£20.10',
-                'price_per_unit': '£6.98 per m²',
                 'supplier': 'Insulation UK',
-                'availability': 'In Stock',
-                'location': 'UK Wide',
-                'delivery_info': 'Free delivery on orders over £200',
-                'supplier_phone': '020 3582 6399',
-                'supplier_url': 'https://insulationuk.co.uk'
+                'dimensions': '2400mm x 1200mm'
             },
             {
                 'product_name': '50mm Celotex GA4050 PIR Insulation Board',
                 'price': '£20.40',
-                'price_per_unit': '£7.08 per m²',
                 'supplier': 'Insulation4Less',
-                'availability': 'In Stock',
-                'location': 'UK Wide',
-                'delivery_info': 'Free delivery on orders over £300',
-                'supplier_phone': '0203 639 4959',
-                'supplier_url': 'https://insulation4less.co.uk'
+                'dimensions': '2400mm x 1200mm'
             },
             {
                 'product_name': '50mm Celotex GA4050 PIR Insulation Board',
                 'price': '£21.00',
-                'price_per_unit': '£7.29 per m²',
                 'supplier': 'Insulation Shop',
-                'availability': 'In Stock',
-                'location': 'UK Wide',
-                'delivery_info': 'Next day delivery available',
-                'supplier_url': 'https://insulationshop.co'
+                'dimensions': '2400mm x 1200mm'
             }
         ],
-        'ai_summary': 'Found multiple 50mm PIR insulation boards from specialist UK suppliers with VAT-inclusive pricing. Insulation UK offers the best value at £20.10 per board, followed by Insulation4Less at £20.40 and Insulation Shop at £21.00.',
+        'ai_summary': 'Top suppliers found: Insulation UK: £20.10, Insulation4Less: £20.40, Insulation Shop: £21.00',
         'search_metadata': {
             'total_results': 3,
             'sources_checked': 'Multiple UK suppliers',
