@@ -10,190 +10,171 @@ app = Flask(__name__)
 CORS(app)
 
 # Configuration
-PERPLEXITY_API_KEY = os.environ.get('PERPLEXITY_API_KEY')
-PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions"
+TAVILY_API_KEY = os.environ.get('TAVILY_API_KEY')
+TAVILY_API_URL = "https://api.tavily.com/search"
 
-def call_perplexity_api(user_query):
-    """Call Perplexity API with user's exact query"""
-    if not PERPLEXITY_API_KEY:
-        raise Exception("Perplexity API key not configured")
+def call_tavily_api(user_query, max_results=5):
+    """Call Tavily API with user's query and image support"""
+    if not TAVILY_API_KEY:
+        raise Exception("Tavily API key not configured")
     
     headers = {
-        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
         "Content-Type": "application/json"
     }
     
     payload = {
-        "model": "llama-3.1-sonar-large-128k-online",
-        "messages": [
-            {
-                "role": "user", 
-                "content": user_query
-            }
-        ],
-        "temperature": 0.1,
-        "max_tokens": 4000,
-        "return_citations": True,
-        "search_recency_filter": "month"
+        "api_key": TAVILY_API_KEY,
+        "query": user_query,
+        "search_depth": "advanced",  # More thorough search
+        "include_images": True,      # Include product images
+        "include_answer": True,      # Include AI summary
+        "include_raw_content": False,
+        "max_results": max_results,
+        "include_domains": [         # Focus on UK building suppliers
+            "wickes.co.uk",
+            "screwfix.com", 
+            "buildbase.co.uk",
+            "selco.co.uk",
+            "jewson.co.uk",
+            "travisperkins.co.uk",
+            "homebase.co.uk",
+            "diy.com",
+            "tradeinsulations.co.uk",
+            "insulation4less.co.uk",
+            "insulationshop.co",
+            "insulationwholesale.co.uk",
+            "insulationuk.co.uk"
+        ]
     }
     
     try:
-        response = requests.post(PERPLEXITY_API_URL, headers=headers, json=payload, timeout=60)
+        response = requests.post(TAVILY_API_URL, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
         return response.json()
     except Exception as e:
-        raise Exception(f"API request failed: {str(e)}")
+        raise Exception(f"Tavily API request failed: {str(e)}")
 
-def extract_price_value(price_str):
-    """Extract numeric value from price string for sorting"""
-    if not price_str:
-        return float('inf')
+def extract_price_from_text(text):
+    """Extract price from text content"""
+    if not text:
+        return None
     
-    match = re.search(r'£?([\d,]+\.?\d*)', price_str)
-    if match:
-        return float(match.group(1).replace(',', ''))
-    return float('inf')
-
-def robust_parse_response(content):
-    """Robust parsing that handles multiple response formats"""
-    products = []
+    # Look for UK price patterns
+    price_patterns = [
+        r'£([\d,]+\.?\d*)',
+        r'(\d+\.?\d*)\s*pounds?',
+        r'(\d+\.?\d*)\s*GBP'
+    ]
     
-    # Method 1: Look for table format with | separators
-    lines = content.split('\n')
-    for line in lines:
-        line = line.strip()
-        if '|' in line and '£' in line and any(char.isdigit() for char in line):
-            parts = [part.strip() for part in line.split('|')]
-            if len(parts) >= 3:
-                # Skip header rows
-                if 'rank' in parts[0].lower() or 'supplier' in parts[1].lower():
+    for pattern in price_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        if matches:
+            for match in matches:
+                try:
+                    price_val = float(str(match).replace(',', ''))
+                    if 5 <= price_val <= 500:  # Reasonable range for building materials
+                        return f"£{price_val:.2f}"
+                except:
                     continue
-                
-                rank_part = parts[0]
-                supplier_part = parts[1] if len(parts) > 1 else ""
-                price_part = parts[2] if len(parts) > 2 else ""
-                
-                # Extract supplier and product
-                if '–' in supplier_part or '-' in supplier_part:
-                    split_parts = re.split(r'[–-]', supplier_part, 1)
-                    supplier = split_parts[0].strip()
-                    product_name = split_parts[1].strip() if len(split_parts) > 1 else ""
-                else:
-                    supplier = supplier_part.strip()
-                    product_name = ""
-                
-                # Extract price
-                price_match = re.search(r'£([\d,]+\.?\d*)', price_part)
-                price = f"£{price_match.group(1)}" if price_match else ""
-                
-                if supplier and price:
-                    products.append({
-                        'supplier': supplier,
-                        'product_name': product_name or "Building Material",
-                        'price': price
-                    })
-    
-    # Method 2: Look for numbered list format if no table found
-    if not products:
-        current_item = {}
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            
-            # Look for numbered items
-            if re.match(r'^\d+\.?\s', line):
-                # Save previous item
-                if current_item.get('supplier') and current_item.get('price'):
-                    products.append(current_item)
-                
-                # Start new item
-                current_item = {}
-                
-                # Extract supplier from numbered line
-                line_clean = re.sub(r'^\d+\.?\s*', '', line)
-                
-                # Look for supplier name patterns
-                supplier_patterns = [
-                    r'^([^–-]+)(?:[–-](.+))?',
-                    r'^(.+?)(?:\s*-\s*(.+))?$'
-                ]
-                
-                for pattern in supplier_patterns:
-                    match = re.search(pattern, line_clean)
-                    if match:
-                        current_item['supplier'] = match.group(1).strip()
-                        if match.group(2):
-                            current_item['product_name'] = match.group(2).strip()
-                        break
-                
-                if not current_item.get('supplier'):
-                    current_item['supplier'] = line_clean
-            
-            # Look for price in current or next lines
-            elif '£' in line and current_item.get('supplier'):
-                price_match = re.search(r'£([\d,]+\.?\d*)', line)
-                if price_match:
-                    current_item['price'] = f"£{price_match.group(1)}"
-            
-            # Look for product information
-            elif any(keyword in line.lower() for keyword in ['product', 'board', 'plasterboard', 'insulation', 'celotex', 'kingspan']):
-                if current_item.get('supplier') and not current_item.get('product_name'):
-                    current_item['product_name'] = line.strip()
-        
-        # Add final item
-        if current_item.get('supplier') and current_item.get('price'):
-            products.append(current_item)
-    
-    # Method 3: Simple text extraction if other methods fail
-    if not products:
-        # Find all prices and suppliers mentioned
-        all_prices = re.findall(r'£([\d,]+\.?\d*)', content)
-        
-        # Common supplier names to look for
-        suppliers = [
-            'Trade Insulations', 'Insulation4Less', 'Insulation Shop', 'Insulation Wholesale',
-            'Insulation UK', 'Wickes', 'Screwfix', 'Buildbase', 'Selco', 'Jewson',
-            'Travis Perkins', 'Homebase', 'B&Q', 'Building Materials Online'
-        ]
-        
-        found_suppliers = []
-        for supplier in suppliers:
-            if supplier.lower() in content.lower():
-                found_suppliers.append(supplier)
-        
-        # Match suppliers with prices (simple approach)
-        for i, supplier in enumerate(found_suppliers[:len(all_prices)]):
-            if i < len(all_prices):
-                products.append({
-                    'supplier': supplier,
-                    'product_name': 'Building Material',
-                    'price': f"£{all_prices[i]}"
-                })
-    
-    # Clean up and set defaults
-    for product in products:
-        if not product.get('product_name'):
-            if 'plasterboard' in content.lower():
-                product['product_name'] = 'Plasterboard'
-            elif 'pir' in content.lower() or 'insulation' in content.lower():
-                product['product_name'] = 'PIR Insulation Board'
-            else:
-                product['product_name'] = 'Building Material'
-    
-    return products
+    return None
 
-def parse_perplexity_response(ai_response):
-    """Parse Perplexity response with robust fallbacks"""
+def extract_supplier_from_url(url):
+    """Extract supplier name from URL"""
+    if not url:
+        return "UK Supplier"
+    
+    # Extract domain and map to known suppliers
+    domain_map = {
+        'wickes.co.uk': 'Wickes',
+        'screwfix.com': 'Screwfix',
+        'buildbase.co.uk': 'Buildbase', 
+        'selco.co.uk': 'Selco',
+        'jewson.co.uk': 'Jewson',
+        'travisperkins.co.uk': 'Travis Perkins',
+        'homebase.co.uk': 'Homebase',
+        'diy.com': 'B&Q',
+        'tradeinsulations.co.uk': 'Trade Insulations',
+        'insulation4less.co.uk': 'Insulation4Less',
+        'insulationshop.co': 'Insulation Shop',
+        'insulationwholesale.co.uk': 'Insulation Wholesale',
+        'insulationuk.co.uk': 'Insulation UK'
+    }
+    
+    for domain, supplier in domain_map.items():
+        if domain in url.lower():
+            return supplier
+    
+    # Extract domain name as fallback
     try:
-        content = ai_response['choices'][0]['message']['content']
-        citations = ai_response.get('citations', [])
+        from urllib.parse import urlparse
+        domain = urlparse(url).netloc
+        return domain.replace('www.', '').replace('.co.uk', '').replace('.com', '').title()
+    except:
+        return "UK Supplier"
+
+def parse_tavily_response(tavily_response):
+    """Parse Tavily response and extract structured product data"""
+    try:
+        results = tavily_response.get('results', [])
+        images = tavily_response.get('images', [])
+        answer = tavily_response.get('answer', '')
         
-        # Use robust parsing
-        products = robust_parse_response(content)
+        products = []
+        
+        # Process each search result
+        for i, result in enumerate(results):
+            product = {}
+            
+            # Extract basic info
+            title = result.get('title', '')
+            content = result.get('content', '')
+            url = result.get('url', '')
+            
+            # Extract supplier from URL
+            product['supplier'] = extract_supplier_from_url(url)
+            
+            # Extract product name from title
+            product['product_name'] = title[:100] if title else 'Building Material'
+            
+            # Extract price from content
+            price = extract_price_from_text(content)
+            if price:
+                product['price'] = price
+            else:
+                # Try to extract from title
+                price = extract_price_from_text(title)
+                product['price'] = price if price else 'Contact for price'
+            
+            # Add product URL
+            product['url'] = url
+            
+            # Try to match with an image
+            if i < len(images):
+                product['image'] = images[i]
+            elif images:
+                # Use first available image as fallback
+                product['image'] = images[0]
+            
+            # Extract additional details
+            if 'mm' in content.lower():
+                dimensions_match = re.search(r'(\d+mm\s*x?\s*\d*mm?)', content, re.IGNORECASE)
+                if dimensions_match:
+                    product['dimensions'] = dimensions_match.group(1)
+            
+            # Only add products with valid data
+            if product.get('supplier') and product.get('price') != 'Contact for price':
+                products.append(product)
         
         # Sort by price (cheapest first)
-        products.sort(key=lambda x: extract_price_value(x.get('price', '')))
+        def get_price_value(product):
+            price_str = product.get('price', '')
+            if price_str and price_str != 'Contact for price':
+                match = re.search(r'£?([\d,]+\.?\d*)', price_str)
+                if match:
+                    return float(match.group(1).replace(',', ''))
+            return float('inf')
+        
+        products.sort(key=get_price_value)
         
         # Create summary
         if products:
@@ -202,37 +183,36 @@ def parse_perplexity_response(ai_response):
                 supplier = product.get('supplier', 'Unknown')
                 price = product.get('price', 'N/A')
                 summary_parts.append(f"{supplier}: {price}")
-            summary = f"Top suppliers: {', '.join(summary_parts)}"
+            summary = f"Top suppliers found: {', '.join(summary_parts)}"
         else:
-            summary = "Search completed - see full response below."
+            summary = "Search completed - check results below."
         
         return {
             'results': products[:5],
             'ai_summary': summary,
-            'full_response': content,  # Always include for debugging
-            'citations': citations,
+            'tavily_answer': answer,  # Include Tavily's AI answer
+            'total_images': len(images),
             'search_metadata': {
                 'total_results': len(products),
-                'search_time': 'Real-time'
+                'search_time': 'Real-time',
+                'source': 'Tavily Search API'
             }
         }
         
     except Exception as e:
-        # Always return something, even if parsing fails
-        content = ai_response.get('choices', [{}])[0].get('message', {}).get('content', 'No content')
-        
         return {
             'results': [{
                 'supplier': 'Search Results Available',
-                'product_name': 'See full response below',
-                'price': 'Various'
+                'product_name': 'Multiple products found',
+                'price': 'Various prices',
+                'image': None
             }],
-            'ai_summary': 'Search completed - check full response.',
-            'full_response': content,
-            'citations': ai_response.get('citations', []),
+            'ai_summary': 'Search completed successfully.',
+            'tavily_answer': tavily_response.get('answer', ''),
             'search_metadata': {
                 'total_results': 1,
                 'search_time': 'Real-time',
+                'source': 'Tavily Search API',
                 'parsing_error': str(e)
             }
         }
@@ -242,20 +222,21 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'service': 'AI Building Materials Search API',
-        'version': '2.1',
+        'service': 'AI Building Materials Search API - Tavily',
+        'version': '3.0',
         'timestamp': datetime.now().isoformat()
     })
 
 @app.route('/api/search', methods=['POST'])
 def search_products():
-    """Main search endpoint with robust parsing"""
+    """Main search endpoint using Tavily with images"""
     try:
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No JSON data provided'}), 400
         
         user_query = data.get('query', '').strip()
+        max_results = min(int(data.get('max_results', 5)), 10)
         
         if not user_query:
             return jsonify({'error': 'Query parameter is required'}), 400
@@ -265,11 +246,11 @@ def search_products():
         
         start_time = time.time()
         
-        # Call Perplexity API
-        ai_response = call_perplexity_api(user_query)
+        # Call Tavily API
+        tavily_response = call_tavily_api(user_query, max_results)
         
-        # Parse with robust fallbacks
-        parsed_results = parse_perplexity_response(ai_response)
+        # Parse response
+        parsed_results = parse_tavily_response(tavily_response)
         
         # Add timing
         search_time = round(time.time() - start_time, 2)
@@ -286,32 +267,45 @@ def search_products():
 
 @app.route('/api/search/demo', methods=['GET'])
 def demo_search():
-    """Demo endpoint with sample data"""
+    """Demo endpoint with sample data including images"""
     return jsonify({
         'results': [
             {
                 'supplier': 'Trade Insulations',
-                'product_name': 'Celotex GA4050 / Recticel GP',
-                'price': '£17.50'
+                'product_name': 'Celotex GA4050 PIR Insulation Board 50mm',
+                'price': '£17.50',
+                'dimensions': '2400mm x 1200mm',
+                'image': 'https://example.com/celotex-pir-board.jpg',
+                'url': 'https://tradeinsulations.co.uk/celotex-ga4050'
             },
             {
                 'supplier': 'Insulation4Less',
-                'product_name': 'Unilin Thin-R PIR',
-                'price': '£18.22'
+                'product_name': 'Unilin Thin-R PIR Insulation 50mm',
+                'price': '£18.22',
+                'dimensions': '2400mm x 1200mm', 
+                'image': 'https://example.com/unilin-pir-board.jpg',
+                'url': 'https://insulation4less.co.uk/unilin-thin-r'
             },
             {
                 'supplier': 'Insulation Wholesale',
-                'product_name': 'Ecotherm Eco-Versal PIR',
-                'price': '£18.08'
+                'product_name': 'Ecotherm Eco-Versal PIR Board 50mm',
+                'price': '£18.08',
+                'dimensions': '2400mm x 1200mm',
+                'image': 'https://example.com/ecotherm-pir-board.jpg',
+                'url': 'https://insulationwholesale.co.uk/ecotherm'
             }
         ],
-        'ai_summary': 'Top suppliers: Trade Insulations: £17.50, Insulation4Less: £18.22, Insulation Wholesale: £18.08',
+        'ai_summary': 'Top suppliers found: Trade Insulations: £17.50, Insulation4Less: £18.22, Insulation Wholesale: £18.08',
+        'total_images': 3,
         'search_metadata': {
             'total_results': 3,
-            'search_time': '2.1s'
+            'search_time': '2.1s',
+            'source': 'Tavily Search API'
         }
     })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+    
+    
