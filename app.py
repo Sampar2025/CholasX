@@ -2,321 +2,279 @@ import json
 import re
 import pickle
 import os
+import requests
+from bs4 import BeautifulSoup
+import time
+import concurrent.futures
+from urllib.parse import urljoin, quote
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
 
-print("🔧 Loading Enhanced Building Materials Search API...")
+print("🔧 Loading Live Supplier Search API...")
 
-# Load the enhanced AI model - Fixed file paths
-try:
-    with open('building_materials_model.pkl', 'rb') as f:
-        MODEL_DATA = pickle.load(f)
-    print("✅ Enhanced AI model loaded successfully")
-    print(f"📊 Model contains {len(MODEL_DATA['knowledge_base']['products'])} products")
-except Exception as e:
-    print(f"❌ Error loading enhanced model: {e}")
-    MODEL_DATA = None
+# Load supplier data
+SUPPLIERS = [
+    {"name": "insulation4less", "website": "https://insulation4less.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "cutpriceinsulation", "website": "https://www.cutpriceinsulation.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "nationalinsulationsupplies", "website": "https://www.nationalinsulationsupplies.com/", "delivery": "All UK", "country": "UK"},
+    {"name": "buildersinsulation", "website": "https://buildersinsulation.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "insulationuk", "website": "https://www.insulationuk.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "buyinsulation", "website": "https://buyinsulation.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "constructionmegastore", "website": "https://constructionmegastore.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "insulationsuperstore", "website": "https://www.insulationsuperstore.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "tradeinsulations", "website": "https://www.tradeinsulations.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "wickes", "website": "https://www.wickes.co.uk/", "delivery": "All UK", "country": "UK"},
+    {"name": "diy.com", "website": "https://www.diy.com/", "delivery": "All UK", "country": "UK"}
+]
 
-# Load enhanced knowledge base - Fixed file path
-try:
-    with open('comprehensive_knowledge_base.json', 'r') as f:
-        ENHANCED_KNOWLEDGE_BASE = json.load(f)
-    print(f"✅ Enhanced knowledge base loaded with {len(ENHANCED_KNOWLEDGE_BASE['products'])} products")
-except Exception as e:
-    print(f"❌ Error loading enhanced knowledge base: {e}")
-    ENHANCED_KNOWLEDGE_BASE = None
+def clean_price(price_text):
+    """Extract price from text"""
+    if not price_text:
+        return None
+    
+    # Remove currency symbols and extract numbers
+    price_match = re.search(r'£?(\d+\.?\d*)', str(price_text).replace(',', ''))
+    if price_match:
+        return float(price_match.group(1))
+    return None
 
-def enhanced_search_products(query, max_results=5):
-    """Enhanced product search using the trained AI model"""
-    if not MODEL_DATA or not MODEL_DATA.get('vectorizer'):
-        return []
+def search_supplier_website(supplier, query, max_results=5):
+    """Search a specific supplier website for products"""
+    results = []
     
     try:
-        from sklearn.metrics.pairwise import cosine_similarity
+        # Create search URL - try common search patterns
+        search_patterns = [
+            f"{supplier['website']}search?q={quote(query)}",
+            f"{supplier['website']}search/{quote(query)}",
+            f"{supplier['website']}?s={quote(query)}",
+            f"{supplier['website']}products?search={quote(query)}"
+        ]
         
-        # Vectorize the query
-        query_vector = MODEL_DATA['vectorizer'].transform([query])
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        }
         
-        # Calculate similarities
-        similarities = cosine_similarity(query_vector, MODEL_DATA['tfidf_matrix']).flatten()
-        
-        # Get top results
-        top_indices = similarities.argsort()[-max_results:][::-1]
-        
-        results = []
-        for idx in top_indices:
-            if similarities[idx] > 0.1:  # Minimum similarity threshold
-                product = MODEL_DATA['knowledge_base']['products'][idx]
+        for search_url in search_patterns:
+            try:
+                print(f"🔍 Searching {supplier['name']}: {search_url}")
+                response = requests.get(search_url, headers=headers, timeout=10)
                 
-                # Format result for API response
-                result = {
-                    "supplier": "CholasX",
-                    "price": f"£{product['price']:.2f}",
-                    "product_name": product['name'],
-                    "category": product['product_type'],
-                    "supplier_website": "https://cholasx.co.uk",
-                    "product_image": product.get('image_url', ''),
-                    "availability": "In Stock",
-                    "delivery": "Next Day Delivery",
-                    "contact": "020-3582-6399",
-                    "rating": "5 stars",
-                    "brand": product['brand'],
-                    "thickness_mm": product.get('thickness_mm'),
-                    "dimensions": f"{product.get('length_mm', 'N/A')}mm x {product.get('width_mm', 'N/A')}mm" if product.get('length_mm') else "N/A",
-                    "price_per_sqm": f"£{product.get('price_per_sqm', 0):.2f}/m²" if product.get('price_per_sqm') else "N/A",
-                    "similarity_score": float(similarities[idx])
-                }
-                results.append(result)
+                if response.status_code == 200:
+                    soup = BeautifulSoup(response.content, 'html.parser')
+                    
+                    # Look for product containers - common selectors
+                    product_selectors = [
+                        '.product', '.product-item', '.product-card',
+                        '.woocommerce-product', '.shop-item',
+                        '[data-product]', '.product-list-item',
+                        '.grid-item', '.catalog-item'
+                    ]
+                    
+                    products_found = []
+                    for selector in product_selectors:
+                        products_found.extend(soup.select(selector))
+                        if len(products_found) >= max_results:
+                            break
+                    
+                    if not products_found:
+                        # Try generic containers
+                        products_found = soup.select('div:contains("£"), li:contains("£"), article:contains("£")')
+                    
+                    for product in products_found[:max_results]:
+                        try:
+                            # Extract product name
+                            name_selectors = [
+                                '.product-title', '.product-name', 'h2', 'h3', 'h4',
+                                '.title', '.name', 'a[href*="product"]'
+                            ]
+                            
+                            product_name = None
+                            for name_sel in name_selectors:
+                                name_elem = product.select_one(name_sel)
+                                if name_elem:
+                                    product_name = name_elem.get_text(strip=True)
+                                    break
+                            
+                            if not product_name:
+                                continue
+                            
+                            # Extract price
+                            price_selectors = [
+                                '.price', '.product-price', '.cost', '.amount',
+                                '[class*="price"]', '[data-price]'
+                            ]
+                            
+                            price = None
+                            for price_sel in price_selectors:
+                                price_elem = product.select_one(price_sel)
+                                if price_elem:
+                                    price = clean_price(price_elem.get_text(strip=True))
+                                    if price:
+                                        break
+                            
+                            # Extract product URL
+                            product_url = supplier['website']
+                            link_elem = product.select_one('a[href]')
+                            if link_elem:
+                                href = link_elem.get('href')
+                                if href:
+                                    product_url = urljoin(supplier['website'], href)
+                            
+                            # Extract image
+                            image_url = ""
+                            img_elem = product.select_one('img')
+                            if img_elem:
+                                img_src = img_elem.get('src') or img_elem.get('data-src')
+                                if img_src:
+                                    image_url = urljoin(supplier['website'], img_src)
+                            
+                            if product_name and price:
+                                result = {
+                                    "supplier": supplier['name'],
+                                    "price": f"£{price:.2f}",
+                                    "price_numeric": price,
+                                    "product_name": product_name,
+                                    "category": "Building Materials",
+                                    "supplier_website": supplier['website'],
+                                    "product_url": product_url,
+                                    "product_image": image_url,
+                                    "availability": "Check with supplier",
+                                    "delivery": supplier['delivery'],
+                                    "contact": "See website",
+                                    "rating": "N/A"
+                                }
+                                results.append(result)
+                        
+                        except Exception as e:
+                            print(f"Error parsing product from {supplier['name']}: {e}")
+                            continue
+                    
+                    if results:
+                        break  # Found results, no need to try other search patterns
+                        
+            except Exception as e:
+                print(f"Error searching {supplier['name']} with pattern: {e}")
+                continue
         
+        print(f"✅ Found {len(results)} products from {supplier['name']}")
         return results
         
     except Exception as e:
-        print(f"Error in enhanced search: {e}")
+        print(f"❌ Error searching {supplier['name']}: {e}")
         return []
 
-def enhanced_answer_query(query):
-    """Enhanced query answering using the trained AI model"""
-    if not MODEL_DATA or not MODEL_DATA.get('query_vectorizer'):
-        return "I'm sorry, I don't have enough information to answer that question."
+def search_all_suppliers(query, max_results_per_supplier=3):
+    """Search all suppliers concurrently"""
+    all_results = []
     
-    try:
-        from sklearn.metrics.pairwise import cosine_similarity
-        
-        # Vectorize user query
-        user_vector = MODEL_DATA['query_vectorizer'].transform([query])
-        
-        # Find most similar queries
-        similarities = cosine_similarity(user_vector, MODEL_DATA['query_vectors']).flatten()
-        top_indices = similarities.argsort()[-3:][::-1]
-        
-        if similarities[top_indices[0]] > 0.3:  # Minimum similarity threshold
-            return MODEL_DATA['responses'][top_indices[0]]
-        else:
-            # Try product search as fallback
-            search_results = enhanced_search_products(query, max_results=3)
-            if search_results:
-                result_text = "Here are some relevant products:\\n"
-                for result in search_results[:3]:
-                    result_text += f"- {result['product_name']} ({result['price']})\\n"
-                return result_text
-            else:
-                return "I'm sorry, I couldn't find relevant information for your query."
-                
-    except Exception as e:
-        print(f"Error in enhanced query answering: {e}")
-        return "I'm sorry, there was an error processing your query."
-
-def get_category_products(category, max_results=10):
-    """Get products by category"""
-    if not ENHANCED_KNOWLEDGE_BASE:
-        return []
+    print(f"🔍 Starting live search across {len(SUPPLIERS)} suppliers for: {query}")
     
-    category_products = [
-        p for p in ENHANCED_KNOWLEDGE_BASE['products'] 
-        if category.lower() in p['product_type'].lower()
-    ]
-    
-    # Sort by price
-    category_products.sort(key=lambda x: x['price'])
-    
-    results = []
-    for product in category_products[:max_results]:
-        result = {
-            "supplier": "CholasX",
-            "price": f"£{product['price']:.2f}",
-            "product_name": product['name'],
-            "category": product['product_type'],
-            "supplier_website": "https://cholasx.co.uk",
-            "product_image": product.get('image_url', ''),
-            "availability": "In Stock",
-            "delivery": "Next Day Delivery",
-            "contact": "020-3582-6399",
-            "rating": "5 stars",
-            "brand": product['brand'],
-            "thickness_mm": product.get('thickness_mm'),
-            "dimensions": f"{product.get('length_mm', 'N/A')}mm x {product.get('width_mm', 'N/A')}mm" if product.get('length_mm') else "N/A",
-            "price_per_sqm": f"£{product.get('price_per_sqm', 0):.2f}/m²" if product.get('price_per_sqm') else "N/A"
+    # Use ThreadPoolExecutor for concurrent searches
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Submit search tasks for all suppliers
+        future_to_supplier = {
+            executor.submit(search_supplier_website, supplier, query, max_results_per_supplier): supplier 
+            for supplier in SUPPLIERS
         }
-        results.append(result)
+        
+        # Collect results as they complete
+        for future in concurrent.futures.as_completed(future_to_supplier, timeout=30):
+            supplier = future_to_supplier[future]
+            try:
+                supplier_results = future.result()
+                all_results.extend(supplier_results)
+            except Exception as e:
+                print(f"❌ {supplier['name']} search failed: {e}")
     
-    return results
-
-def get_price_range_products(min_price=0, max_price=1000, max_results=10):
-    """Get products within price range"""
-    if not ENHANCED_KNOWLEDGE_BASE:
-        return []
+    # Sort by price (cheapest first)
+    all_results.sort(key=lambda x: x.get('price_numeric', float('inf')))
     
-    filtered_products = [
-        p for p in ENHANCED_KNOWLEDGE_BASE['products'] 
-        if min_price <= p['price'] <= max_price
-    ]
-    
-    # Sort by price
-    filtered_products.sort(key=lambda x: x['price'])
-    
-    results = []
-    for product in filtered_products[:max_results]:
-        result = {
-            "supplier": "CholasX",
-            "price": f"£{product['price']:.2f}",
-            "product_name": product['name'],
-            "category": product['product_type'],
-            "supplier_website": "https://cholasx.co.uk",
-            "product_image": product.get('image_url', ''),
-            "availability": "In Stock",
-            "delivery": "Next Day Delivery",
-            "contact": "020-3582-6399",
-            "rating": "5 stars",
-            "brand": product['brand'],
-            "thickness_mm": product.get('thickness_mm'),
-            "dimensions": f"{product.get('length_mm', 'N/A')}mm x {product.get('width_mm', 'N/A')}mm" if product.get('length_mm') else "N/A",
-            "price_per_sqm": f"£{product.get('price_per_sqm', 0):.2f}/m²" if product.get('price_per_sqm') else "N/A"
-        }
-        results.append(result)
-    
-    return results
+    print(f"✅ Live search completed. Found {len(all_results)} total products")
+    return all_results
 
 @app.route('/')
 def health_check():
     """Health check endpoint"""
-    status = {
+    return jsonify({
         "status": "healthy",
-        "service": "Enhanced Building Materials Search API",
-        "version": "2.0",
-        "model_loaded": MODEL_DATA is not None,
-        "knowledge_base_loaded": ENHANCED_KNOWLEDGE_BASE is not None
-    }
-    
-    if ENHANCED_KNOWLEDGE_BASE:
-        status.update({
-            "total_products": len(ENHANCED_KNOWLEDGE_BASE['products']),
-            "total_suppliers": len(ENHANCED_KNOWLEDGE_BASE['suppliers']),
-            "categories": ENHANCED_KNOWLEDGE_BASE['product_types'],
-            "brands": ENHANCED_KNOWLEDGE_BASE['brands']
-        })
-    
-    return jsonify(status)
+        "service": "Live Supplier Search API",
+        "version": "3.0 - Live Search",
+        "suppliers": len(SUPPLIERS),
+        "search_type": "live_web_scraping",
+        "supplier_list": [s['name'] for s in SUPPLIERS]
+    })
 
 @app.route('/api/search', methods=['POST'])
 def search():
-    """Enhanced search endpoint"""
+    """Live supplier search endpoint"""
     try:
         data = request.get_json()
         query = data.get('query', '').strip()
-        max_results = min(data.get('max_results', 5), 20)  # Limit to 20 results
+        max_results = min(data.get('max_results', 10), 20)
         
         if not query:
             return jsonify({"error": "Query parameter is required"}), 400
         
-        print(f"🔍 Enhanced search query: {query}")
+        print(f"🔍 Live supplier search query: {query}")
         
-        # Check for specific search types
-        query_lower = query.lower()
+        # Perform live search across all suppliers
+        results = search_all_suppliers(query, max_results_per_supplier=3)
         
-        # Category search
-        if any(cat.lower() in query_lower for cat in ['insulation', 'plasterboard', 'timber', 'cement']):
-            for cat in ['insulation', 'plasterboard', 'timber', 'cement']:
-                if cat in query_lower:
-                    results = get_category_products(cat, max_results)
-                    break
-        # Price range search
-        elif 'cheap' in query_lower or 'budget' in query_lower or 'under' in query_lower:
-            # Extract price if mentioned
-            price_match = re.search(r'under\s*£?(\d+)', query_lower)
-            max_price = int(price_match.group(1)) if price_match else 50
-            results = get_price_range_products(0, max_price, max_results)
-        elif 'expensive' in query_lower or 'premium' in query_lower or 'over' in query_lower:
-            price_match = re.search(r'over\s*£?(\d+)', query_lower)
-            min_price = int(price_match.group(1)) if price_match else 100
-            results = get_price_range_products(min_price, 1000, max_results)
-        else:
-            # General enhanced search
-            results = enhanced_search_products(query, max_results)
+        # Limit total results
+        results = results[:max_results]
         
-        # If no results from enhanced search, try answering as a question
         if not results:
-            answer = enhanced_answer_query(query)
             return jsonify({
                 "query": query,
-                "answer": answer,
                 "results": [],
                 "total_results": 0,
-                "search_type": "conversational"
+                "search_type": "live_supplier_search",
+                "message": "No products found across supplier websites. Try different keywords.",
+                "searched_suppliers": [s['name'] for s in SUPPLIERS]
             })
         
         response = {
             "query": query,
             "results": results,
             "total_results": len(results),
-            "search_type": "product_search",
-            "message": f"Found {len(results)} products matching your search"
+            "search_type": "live_supplier_search",
+            "message": f"Found {len(results)} products from live supplier search",
+            "searched_suppliers": list(set([r['supplier'] for r in results])),
+            "search_time": "Real-time"
         }
         
         return jsonify(response)
         
     except Exception as e:
         print(f"❌ Search error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
+        return jsonify({
+            "error": "Search failed",
+            "message": str(e),
+            "search_type": "live_supplier_search"
+        }), 500
 
 @app.route('/api/search/demo', methods=['GET'])
 def demo():
-    """Demo endpoint with sample enhanced data"""
-    sample_results = enhanced_search_products("25mm insulation board", max_results=3)
-    
-    if not sample_results:
-        # Fallback demo data
-        sample_results = [
-            {
-                "supplier": "CholasX",
-                "price": "£13.60",
-                "product_name": "25mm Celotex TB4025 PIR Insulation Board 2400mm x 1200mm",
-                "category": "PIR Insulation",
-                "supplier_website": "https://cholasx.co.uk",
-                "product_image": "https://cholasx.co.uk/wp-content/uploads/2024/12/25mm-celotex-tb4025-pir-insulation-board-2400mm-x-1200mm-2.jpg",
-                "availability": "In Stock",
-                "delivery": "Next Day Delivery",
-                "contact": "020-3582-6399",
-                "rating": "5 stars",
-                "brand": "Celotex",
-                "thickness_mm": 25,
-                "dimensions": "2400mm x 1200mm",
-                "price_per_sqm": "£4.72/m²"
-            }
-        ]
-    
+    """Demo endpoint"""
     return jsonify({
-        "query": "25mm insulation board (demo)",
-        "results": sample_results,
-        "total_results": len(sample_results),
-        "search_type": "demo",
-        "message": "Demo results from enhanced AI model"
+        "query": "demo search",
+        "message": "This is the live supplier search API. Use POST /api/search with a query to search across real supplier websites.",
+        "suppliers": [s['name'] for s in SUPPLIERS],
+        "search_type": "live_supplier_search"
     })
-
-@app.route('/api/categories', methods=['GET'])
-def get_categories():
-    """Get available product categories"""
-    if ENHANCED_KNOWLEDGE_BASE:
-        return jsonify({
-            "categories": ENHANCED_KNOWLEDGE_BASE['product_types'],
-            "brands": ENHANCED_KNOWLEDGE_BASE['brands'],
-            "price_range": ENHANCED_KNOWLEDGE_BASE['price_ranges']
-        })
-    else:
-        return jsonify({"error": "Knowledge base not available"}), 500
 
 @app.route('/api/suppliers', methods=['GET'])
 def get_suppliers():
     """Get available suppliers"""
-    if ENHANCED_KNOWLEDGE_BASE:
-        return jsonify({
-            "suppliers": ENHANCED_KNOWLEDGE_BASE['suppliers'],
-            "total_suppliers": len(ENHANCED_KNOWLEDGE_BASE['suppliers'])
-        })
-    else:
-        return jsonify({"error": "Knowledge base not available"}), 500
+    return jsonify({
+        "suppliers": SUPPLIERS,
+        "total_suppliers": len(SUPPLIERS),
+        "search_type": "live_web_scraping"
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
