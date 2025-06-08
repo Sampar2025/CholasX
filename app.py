@@ -1,11 +1,9 @@
 import json
 import re
-import pickle
 import os
 import requests
 from bs4 import BeautifulSoup
 import time
-import concurrent.futures
 from urllib.parse import urljoin, quote
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -13,21 +11,15 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-print("🔧 Loading Live Supplier Search API...")
+print("🔧 Loading Memory-Optimized Supplier Search API...")
 
-# Load supplier data
+# Reduced supplier list for memory optimization
 SUPPLIERS = [
-    {"name": "insulation4less", "website": "https://insulation4less.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "cutpriceinsulation", "website": "https://www.cutpriceinsulation.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "nationalinsulationsupplies", "website": "https://www.nationalinsulationsupplies.com/", "delivery": "All UK", "country": "UK"},
-    {"name": "buildersinsulation", "website": "https://buildersinsulation.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "insulationuk", "website": "https://www.insulationuk.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "buyinsulation", "website": "https://buyinsulation.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "constructionmegastore", "website": "https://constructionmegastore.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "insulationsuperstore", "website": "https://www.insulationsuperstore.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "tradeinsulations", "website": "https://www.tradeinsulations.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "wickes", "website": "https://www.wickes.co.uk/", "delivery": "All UK", "country": "UK"},
-    {"name": "diy.com", "website": "https://www.diy.com/", "delivery": "All UK", "country": "UK"}
+    {"name": "insulation4less", "website": "https://insulation4less.co.uk/", "delivery": "All UK"},
+    {"name": "cutpriceinsulation", "website": "https://www.cutpriceinsulation.co.uk/", "delivery": "All UK"},
+    {"name": "buildersinsulation", "website": "https://buildersinsulation.co.uk/", "delivery": "All UK"},
+    {"name": "constructionmegastore", "website": "https://constructionmegastore.co.uk/", "delivery": "All UK"},
+    {"name": "wickes", "website": "https://www.wickes.co.uk/", "delivery": "All UK"}
 ]
 
 def clean_price(price_text):
@@ -35,130 +27,75 @@ def clean_price(price_text):
     if not price_text:
         return None
     
-    # Remove currency symbols and extract numbers
     price_match = re.search(r'£?(\d+\.?\d*)', str(price_text).replace(',', ''))
     if price_match:
         return float(price_match.group(1))
     return None
 
-def search_supplier_website(supplier, query, max_results=5):
-    """Search a specific supplier website for products"""
+def search_supplier_website(supplier, query, max_results=2):
+    """Memory-optimized supplier search"""
     results = []
     
     try:
-        # Create search URL - try common search patterns
-        search_patterns = [
-            f"{supplier['website']}search?q={quote(query)}",
-            f"{supplier['website']}search/{quote(query)}",
-            f"{supplier['website']}?s={quote(query)}",
-            f"{supplier['website']}products?search={quote(query)}"
-        ]
+        # Simplified search URL
+        search_url = f"{supplier['website']}search?q={quote(query)}"
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        for search_url in search_patterns:
-            try:
-                print(f"🔍 Searching {supplier['name']}: {search_url}")
-                response = requests.get(search_url, headers=headers, timeout=10)
+        print(f"🔍 Searching {supplier['name']}")
+        response = requests.get(search_url, headers=headers, timeout=8)
+        
+        if response.status_code == 200:
+            # Use lxml parser for better memory efficiency
+            soup = BeautifulSoup(response.content, 'lxml')
+            
+            # Look for products with simpler selectors
+            products = soup.find_all(['div', 'article'], class_=lambda x: x and 'product' in x.lower())[:max_results]
+            
+            if not products:
+                # Fallback to any element containing price
+                products = soup.find_all(string=re.compile(r'£\d+'))[:max_results]
+                products = [p.parent for p in products if p.parent]
+            
+            for product in products[:max_results]:
+                try:
+                    # Extract product name
+                    name_elem = product.find(['h2', 'h3', 'h4', 'a'])
+                    product_name = name_elem.get_text(strip=True) if name_elem else "Product"
+                    
+                    # Extract price
+                    price_elem = product.find(string=re.compile(r'£\d+'))
+                    if not price_elem:
+                        price_elem = product.find(class_=lambda x: x and 'price' in x.lower())
+                    
+                    price = None
+                    if price_elem:
+                        price = clean_price(price_elem if isinstance(price_elem, str) else price_elem.get_text())
+                    
+                    # Extract link
+                    link_elem = product.find('a', href=True)
+                    product_url = urljoin(supplier['website'], link_elem['href']) if link_elem else supplier['website']
+                    
+                    if product_name and price and price > 0:
+                        result = {
+                            "supplier": supplier['name'],
+                            "price": f"£{price:.2f}",
+                            "price_numeric": price,
+                            "product_name": product_name[:100],  # Limit length
+                            "category": "Building Materials",
+                            "supplier_website": supplier['website'],
+                            "product_url": product_url,
+                            "availability": "Check with supplier",
+                            "delivery": supplier['delivery'],
+                            "contact": "See website",
+                            "rating": "N/A"
+                        }
+                        results.append(result)
                 
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.content, 'html.parser')
-                    
-                    # Look for product containers - common selectors
-                    product_selectors = [
-                        '.product', '.product-item', '.product-card',
-                        '.woocommerce-product', '.shop-item',
-                        '[data-product]', '.product-list-item',
-                        '.grid-item', '.catalog-item'
-                    ]
-                    
-                    products_found = []
-                    for selector in product_selectors:
-                        products_found.extend(soup.select(selector))
-                        if len(products_found) >= max_results:
-                            break
-                    
-                    if not products_found:
-                        # Try generic containers
-                        products_found = soup.select('div:contains("£"), li:contains("£"), article:contains("£")')
-                    
-                    for product in products_found[:max_results]:
-                        try:
-                            # Extract product name
-                            name_selectors = [
-                                '.product-title', '.product-name', 'h2', 'h3', 'h4',
-                                '.title', '.name', 'a[href*="product"]'
-                            ]
-                            
-                            product_name = None
-                            for name_sel in name_selectors:
-                                name_elem = product.select_one(name_sel)
-                                if name_elem:
-                                    product_name = name_elem.get_text(strip=True)
-                                    break
-                            
-                            if not product_name:
-                                continue
-                            
-                            # Extract price
-                            price_selectors = [
-                                '.price', '.product-price', '.cost', '.amount',
-                                '[class*="price"]', '[data-price]'
-                            ]
-                            
-                            price = None
-                            for price_sel in price_selectors:
-                                price_elem = product.select_one(price_sel)
-                                if price_elem:
-                                    price = clean_price(price_elem.get_text(strip=True))
-                                    if price:
-                                        break
-                            
-                            # Extract product URL
-                            product_url = supplier['website']
-                            link_elem = product.select_one('a[href]')
-                            if link_elem:
-                                href = link_elem.get('href')
-                                if href:
-                                    product_url = urljoin(supplier['website'], href)
-                            
-                            # Extract image
-                            image_url = ""
-                            img_elem = product.select_one('img')
-                            if img_elem:
-                                img_src = img_elem.get('src') or img_elem.get('data-src')
-                                if img_src:
-                                    image_url = urljoin(supplier['website'], img_src)
-                            
-                            if product_name and price:
-                                result = {
-                                    "supplier": supplier['name'],
-                                    "price": f"£{price:.2f}",
-                                    "price_numeric": price,
-                                    "product_name": product_name,
-                                    "category": "Building Materials",
-                                    "supplier_website": supplier['website'],
-                                    "product_url": product_url,
-                                    "product_image": image_url,
-                                    "availability": "Check with supplier",
-                                    "delivery": supplier['delivery'],
-                                    "contact": "See website",
-                                    "rating": "N/A"
-                                }
-                                results.append(result)
-                        
-                        except Exception as e:
-                            print(f"Error parsing product from {supplier['name']}: {e}")
-                            continue
-                    
-                    if results:
-                        break  # Found results, no need to try other search patterns
-                        
-            except Exception as e:
-                print(f"Error searching {supplier['name']} with pattern: {e}")
-                continue
+                except Exception as e:
+                    continue
         
         print(f"✅ Found {len(results)} products from {supplier['name']}")
         return results
@@ -167,33 +104,30 @@ def search_supplier_website(supplier, query, max_results=5):
         print(f"❌ Error searching {supplier['name']}: {e}")
         return []
 
-def search_all_suppliers(query, max_results_per_supplier=3):
-    """Search all suppliers concurrently"""
+def search_suppliers_sequential(query, max_suppliers=3):
+    """Sequential search to reduce memory usage"""
     all_results = []
     
-    print(f"🔍 Starting live search across {len(SUPPLIERS)} suppliers for: {query}")
+    print(f"🔍 Starting optimized search for: {query}")
     
-    # Use ThreadPoolExecutor for concurrent searches
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        # Submit search tasks for all suppliers
-        future_to_supplier = {
-            executor.submit(search_supplier_website, supplier, query, max_results_per_supplier): supplier 
-            for supplier in SUPPLIERS
-        }
-        
-        # Collect results as they complete
-        for future in concurrent.futures.as_completed(future_to_supplier, timeout=30):
-            supplier = future_to_supplier[future]
-            try:
-                supplier_results = future.result()
-                all_results.extend(supplier_results)
-            except Exception as e:
-                print(f"❌ {supplier['name']} search failed: {e}")
+    # Search suppliers one by one (sequential, not concurrent)
+    for i, supplier in enumerate(SUPPLIERS[:max_suppliers]):
+        try:
+            supplier_results = search_supplier_website(supplier, query, max_results=2)
+            all_results.extend(supplier_results)
+            
+            # Small delay to prevent overwhelming servers
+            if i < len(SUPPLIERS) - 1:
+                time.sleep(0.5)
+                
+        except Exception as e:
+            print(f"❌ {supplier['name']} search failed: {e}")
+            continue
     
-    # Sort by price (cheapest first)
+    # Sort by price
     all_results.sort(key=lambda x: x.get('price_numeric', float('inf')))
     
-    print(f"✅ Live search completed. Found {len(all_results)} total products")
+    print(f"✅ Search completed. Found {len(all_results)} total products")
     return all_results
 
 @app.route('/')
@@ -201,30 +135,30 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "service": "Live Supplier Search API",
-        "version": "3.0 - Live Search",
+        "service": "Memory-Optimized Supplier Search API",
+        "version": "3.1 - Optimized",
         "suppliers": len(SUPPLIERS),
-        "search_type": "live_web_scraping",
-        "supplier_list": [s['name'] for s in SUPPLIERS]
+        "search_type": "sequential_web_search",
+        "memory_optimized": True
     })
 
 @app.route('/api/search', methods=['POST'])
 def search():
-    """Live supplier search endpoint"""
+    """Optimized search endpoint"""
     try:
         data = request.get_json()
         query = data.get('query', '').strip()
-        max_results = min(data.get('max_results', 10), 20)
+        max_results = min(data.get('max_results', 6), 10)  # Reduced limit
         
         if not query:
             return jsonify({"error": "Query parameter is required"}), 400
         
-        print(f"🔍 Live supplier search query: {query}")
+        print(f"🔍 Optimized search query: {query}")
         
-        # Perform live search across all suppliers
-        results = search_all_suppliers(query, max_results_per_supplier=3)
+        # Perform sequential search (memory efficient)
+        results = search_suppliers_sequential(query, max_suppliers=3)
         
-        # Limit total results
+        # Limit results
         results = results[:max_results]
         
         if not results:
@@ -232,19 +166,19 @@ def search():
                 "query": query,
                 "results": [],
                 "total_results": 0,
-                "search_type": "live_supplier_search",
-                "message": "No products found across supplier websites. Try different keywords.",
-                "searched_suppliers": [s['name'] for s in SUPPLIERS]
+                "search_type": "optimized_supplier_search",
+                "message": "No products found. Try simpler keywords like '50mm insulation' or 'plasterboard'.",
+                "searched_suppliers": [s['name'] for s in SUPPLIERS[:3]]
             })
         
         response = {
             "query": query,
             "results": results,
             "total_results": len(results),
-            "search_type": "live_supplier_search",
-            "message": f"Found {len(results)} products from live supplier search",
+            "search_type": "optimized_supplier_search",
+            "message": f"Found {len(results)} products from supplier search",
             "searched_suppliers": list(set([r['supplier'] for r in results])),
-            "search_time": "Real-time"
+            "search_time": "Optimized"
         }
         
         return jsonify(response)
@@ -253,8 +187,8 @@ def search():
         print(f"❌ Search error: {e}")
         return jsonify({
             "error": "Search failed",
-            "message": str(e),
-            "search_type": "live_supplier_search"
+            "message": "Please try simpler search terms",
+            "search_type": "optimized_supplier_search"
         }), 500
 
 @app.route('/api/search/demo', methods=['GET'])
@@ -262,9 +196,9 @@ def demo():
     """Demo endpoint"""
     return jsonify({
         "query": "demo search",
-        "message": "This is the live supplier search API. Use POST /api/search with a query to search across real supplier websites.",
+        "message": "Memory-optimized supplier search API. Use POST /api/search with simple queries like '50mm insulation'.",
         "suppliers": [s['name'] for s in SUPPLIERS],
-        "search_type": "live_supplier_search"
+        "search_type": "optimized_supplier_search"
     })
 
 @app.route('/api/suppliers', methods=['GET'])
@@ -273,7 +207,7 @@ def get_suppliers():
     return jsonify({
         "suppliers": SUPPLIERS,
         "total_suppliers": len(SUPPLIERS),
-        "search_type": "live_web_scraping"
+        "search_type": "optimized_web_search"
     })
 
 if __name__ == '__main__':
