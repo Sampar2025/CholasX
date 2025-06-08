@@ -10,9 +10,9 @@ CORS(app)
 
 print("🔧 Loading Enhanced Building Materials Search API...")
 
-# Load the enhanced AI model
+# Load the enhanced AI model - Fixed file paths
 try:
-    with open('enhanced_building_materials_model.pkl', 'rb') as f:
+    with open('building_materials_model.pkl', 'rb') as f:
         MODEL_DATA = pickle.load(f)
     print("✅ Enhanced AI model loaded successfully")
     print(f"📊 Model contains {len(MODEL_DATA['knowledge_base']['products'])} products")
@@ -20,9 +20,9 @@ except Exception as e:
     print(f"❌ Error loading enhanced model: {e}")
     MODEL_DATA = None
 
-# Load enhanced knowledge base
+# Load enhanced knowledge base - Fixed file path
 try:
-    with open('enhanced_knowledge_base.json', 'r') as f:
+    with open('comprehensive_knowledge_base.json', 'r') as f:
         ENHANCED_KNOWLEDGE_BASE = json.load(f)
     print(f"✅ Enhanced knowledge base loaded with {len(ENHANCED_KNOWLEDGE_BASE['products'])} products")
 except Exception as e:
